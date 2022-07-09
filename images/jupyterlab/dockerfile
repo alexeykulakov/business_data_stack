@@ -1,0 +1,101 @@
+FROM eidox/base:latest
+MAINTAINER Alexander Erofeev <a.erofeev@yahoo.com>
+
+ARG NB_USER="user"
+ARG NB_UID="1000"
+ARG NB_GID="100"
+
+# Configure environment
+ENV CONDA_DIR=/opt/conda \
+    SHELL=/bin/bash \
+    NB_USER="${NB_USER}" \
+    NB_UID=${NB_UID} \
+    NB_GID=${NB_GID} \
+    LC_ALL=en_US.UTF-8 \
+    LANG=en_US.UTF-8 \
+    LANGUAGE=en_US.UTF-8
+ENV PATH="${CONDA_DIR}/bin:${PATH}" \
+    HOME="/home/${NB_USER}"
+
+# Fix DL4006
+SHELL ["/bin/bash", "-o", "pipefail", "-c"]
+
+USER root
+
+# Install all OS dependencies for notebook server that starts but lacks all
+# features (e.g., download as all possible file formats)
+# Install tini: init for containers
+RUN apt-get update --yes && \
+    apt-get install --yes --no-install-recommends \
+    tini \
+    fonts-liberation \
+    run-one \
+    graphviz \
+    graphviz-dev &&\
+    apt-get clean && rm -rf /var/lib/apt/lists/* && \
+    echo "en_US.UTF-8 UTF-8" > /etc/locale.gen && \
+    locale-gen
+
+# R pre-requisites
+#RUN apt-get update --yes && \
+#    apt-get install --yes --no-install-recommends \
+#    fonts-dejavu \
+#    unixodbc \
+#    unixodbc-dev \
+#    r-cran-rodbc \
+#    gcc && \
+#    apt-get clean && rm -rf /var/lib/apt/lists/*
+
+
+# Install Jupyter Notebook, Lab, and Hub
+# Generate a notebook server config
+# Cleanup temporary files
+# Correct permissions
+# Do all this in a single RUN command to avoid duplicating all of the
+# files across image layers when the permissions change
+RUN mamba install --quiet --yes \
+    'notebook' \
+    'jupyterhub' \
+    'jupyterlab' \
+    'r-devtools' \
+    'r-irkernel' && \
+    mamba clean --all -f -y && \
+    npm cache clean --force && \
+    jupyter notebook --generate-config && \
+    jupyter lab clean && \
+    rm -rf "/home/${NB_USER}/.cache/yarn" && \
+    fix-permissions "${CONDA_DIR}" && \
+    fix-permissions "/home/${NB_USER}"
+
+EXPOSE 8888
+EXPOSE 40000
+
+COPY start.sh start-notebook.sh start-singleuser.sh /usr/local/bin/
+# Currently need to have both jupyter_notebook_config and jupyter_server_config to support classic and lab
+COPY jupyter_notebook_config.py /etc/jupyter/
+
+# Prepare upgrade to JupyterLab V3.0 #1205
+RUN sed -re "s/c.NotebookApp/c.ServerApp/g" \
+    /etc/jupyter/jupyter_notebook_config.py > /etc/jupyter/jupyter_server_config.py && \
+    fix-permissions /etc/jupyter/
+
+# Switch back to user to avoid accidental container runs as root
+#USER ${NB_UID}
+
+WORKDIR "${HOME}"
+
+# Install nessie requirements
+COPY requirements_pip.txt /home/${NB_USER}
+
+RUN pip install --upgrade pip \
+    && pip install -r /home/${NB_USER}/requirements_pip.txt
+
+# install python s3 packages
+RUN pip install minio
+RUN pip install jupyterlab-s3-browser
+# enable jupyter-s3 browser
+RUN jupyter serverextension enable --py jupyterlab_s3_browser
+
+# Configure container startup
+ENTRYPOINT ["tini", "-g", "--"]
+CMD ["/usr/local/bin/start-notebook.sh"]

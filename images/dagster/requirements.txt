@@ -1,0 +1,7 @@
+dagster
+dagit
+dagster-postgres
+dagster-docker
+minio
+yfinance
+s3fs

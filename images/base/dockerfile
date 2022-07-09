@@ -1,0 +1,189 @@
+FROM ubuntu:focal-20210119
+MAINTAINER Alexander Erofeev <a.erofeev@yahoo.com>
+
+RUN apt-get update \
+  && apt-get install -yq --no-install-recommends \
+    locales \
+    apt-utils \ 
+  && echo "en_US.UTF-8 UTF-8" >> /etc/locale.gen \
+  && locale-gen en_US.utf8 \
+  && /usr/sbin/update-locale LANG=en_US.UTF-8
+
+ARG NB_USER="user"
+ARG NB_UID="1000"
+ARG NB_GID="100"
+ARG PYTHON_VERSION=3.9.7
+
+ENV MINICONDA_VERSION=4.9.2 \
+    CONDA_VERSION=4.9.2 \
+    SPARK_VERSION=3.2.1 \
+    HADOOP_VERSION=3.2
+
+ADD . /build
+RUN chmod 750 /build/system_services.sh
+RUN /build/system_services.sh 
+
+ENV DEBIAN_FRONTEND noninteractive
+
+# Install software
+RUN apt-get update \
+ && apt-get install -yq --no-install-recommends \
+    file \
+    ca-certificates \
+    curl \
+    libcurl4 \
+    git \
+    libssl-dev \
+    libcurl4-openssl-dev \
+    lsb-release \
+    sudo \
+    build-essential \
+    cmake \
+    file \
+    g++ \
+    gfortran \
+    gsfonts \
+    libbz2-1.0 \
+    libcurl4 \
+    locales \
+    make \
+    unzip \
+    zip \
+    zlib1g \
+    wget \
+    gdebi-core \
+    libapparmor1 \
+    iproute2 \
+    software-properties-common \
+    openjdk-11-jre-headless \
+    ca-certificates-java \
+  && echo "en_US.UTF-8 UTF-8" >> /etc/locale.gen \
+  && locale-gen en_US.utf8 \
+  && /usr/sbin/update-locale LANG=en_US.UTF-8 \
+  && rm -rf /var/lib/apt/lists/*
+
+# Configure environment
+ENV CONDA_DIR=/opt/conda \
+    SHELL=/bin/bash \
+    NB_USER=$NB_USER \
+    NB_UID=$NB_UID \
+    NB_GID=$NB_GID \
+    LC_ALL=en_US.UTF-8 \
+    LANG=en_US.UTF-8 \
+    LANGUAGE=en_US.UTF-8
+ENV PATH=$CONDA_DIR/bin:$PATH \
+    HOME=/home/$NB_USER
+
+# Copy a script that we will use to correct permissions after running certain commands
+COPY fix-permissions /usr/local/bin/fix-permissions
+RUN chmod a+rx /usr/local/bin/fix-permissions
+
+# Enable prompt color in the skeleton .bashrc before creating the default NB_USER
+# hadolint ignore=SC2016
+RUN sed -i 's/^#force_color_prompt=yes/force_color_prompt=yes/' /etc/skel/.bashrc && \
+   # Add call to conda init script see https://stackoverflow.com/a/58081608/4413446
+   echo 'eval "$(command conda shell.bash hook 2> /dev/null)"' >> /etc/skel/.bashrc
+
+
+# Create NB_USER wtih name jovyan user with UID=1000 and in the 'users' group
+# and make sure these dirs are writable by the `users` group.
+RUN echo "auth requisite pam_deny.so" >> /etc/pam.d/su && \
+    sed -i.bak -e 's/^%admin/#%admin/' /etc/sudoers && \
+    sed -i.bak -e 's/^%sudo/#%sudo/' /etc/sudoers && \
+    useradd -m -s /bin/bash -N -u $NB_UID $NB_USER && \
+    mkdir -p $CONDA_DIR && \
+    chown $NB_USER:$NB_GID $CONDA_DIR && \
+    chmod g+w /etc/passwd && \
+    fix-permissions $HOME && \
+    fix-permissions "$(dirname $CONDA_DIR)"
+
+
+# http://blog.stuart.axelbrooke.com/python-3-on-spark-return-of-the-pythonhashseed
+ENV PYTHONHASHSEED 0
+ENV PYTHONIOENCODING UTF-8
+ENV PIP_DISABLE_PIP_VERSION_CHECK 1
+
+ENV SPARK_HOME /usr/local/spark
+
+RUN cd /tmp && \
+      wget https://archive.apache.org/dist/spark/spark-${SPARK_VERSION}/spark-${SPARK_VERSION}-bin-hadoop${HADOOP_VERSION}.tgz && \
+      tar -xvzf spark-${SPARK_VERSION}-bin-hadoop${HADOOP_VERSION}.tgz -C /usr/local --owner root --group root --no-same-owner && \
+      rm spark-${SPARK_VERSION}-bin-hadoop${HADOOP_VERSION}.tgz
+RUN cd /usr/local && ln -s spark-${SPARK_VERSION}-bin-hadoop${HADOOP_VERSION} spark
+
+RUN apt-get update \
+ && apt-get install -y \
+    python-setuptools \
+    maven \
+    python3-pip \
+ && apt-get clean \
+ && rm -rf /var/lib/apt/lists/*
+
+# ---- Miniforge installer ----
+# Check https://github.com/conda-forge/miniforge/releases
+# Package Manager and Python implementation to use (https://github.com/conda-forge/miniforge)
+# We're using Mambaforge installer, possible options:
+# - conda only: either Miniforge3 to use Python or Miniforge-pypy3 to use PyPy
+# - conda + mamba: either Mambaforge to use Python or Mambaforge-pypy3 to use PyPy
+# Installation: conda, mamba, pip
+RUN set -x && \
+    # Miniforge installer
+    miniforge_arch=$(uname -m) && \
+    miniforge_installer="Mambaforge-Linux-${miniforge_arch}.sh" && \
+    wget --quiet "https://github.com/conda-forge/miniforge/releases/latest/download/${miniforge_installer}" && \
+    /bin/bash "${miniforge_installer}" -f -b -p "${CONDA_DIR}" && \
+    rm "${miniforge_installer}" && \
+    # Conda configuration see https://conda.io/projects/conda/en/latest/configuration.html
+    conda config --system --set auto_update_conda false && \
+    conda config --system --set show_channel_urls true && \
+    if [[ "${PYTHON_VERSION}" != "default" ]]; then mamba install --quiet --yes python="${PYTHON_VERSION}"; fi && \
+    mamba list python | grep '^python ' | tr -s ' ' | cut -d ' ' -f 1,2 >> "${CONDA_DIR}/conda-meta/pinned" && \
+    # Using conda to update all packages: https://github.com/mamba-org/mamba/issues/1092
+    conda update --all --quiet --yes && \
+    conda clean --all -f -y && \
+    rm -rf "/home/${NB_USER}/.cache/yarn" && \
+    fix-permissions "${CONDA_DIR}" && \
+    fix-permissions "/home/${NB_USER}"
+
+
+# ---- Install R software ----
+#
+# Add repository
+RUN apt-key adv --no-tty --keyserver keyserver.ubuntu.com --recv-keys E298A3A825C0D65DFD57CBB651716619E084DAB9 \
+    && add-apt-repository 'deb https://cloud.r-project.org/bin/linux/ubuntu focal-cran40/' \
+    && apt update
+
+# Installation of R
+RUN apt-get update \
+    && apt-get install -y -q --no-install-recommends \
+        r-base \
+        r-base-dev \
+    && echo "options(repos = c(CRAN = 'https://cran.rstudio.com/'), download.file.method = 'libcurl')" >> /usr/lib/R/etc/Rprofile.site \
+    ## Add a library directory (for user-installed packages)
+    && mkdir -p /usr/lib/R/site-library \
+    && chown root:staff /usr/lib/R/site-library \
+    && chmod 777 /usr/lib/R/site-library \
+    ## Fix library path
+    && echo "R_LIBS_USER='/usr/lib/R/site-library'" >> /usr/lib/R/etc/Renviron \
+    && echo "R_LIBS=\${R_LIBS-'/usr/lib/R/site-library:/usr/lib/R/library:/usr/lib/R/library'}" >> /usr/lib/R/etc/Renviron \
+    && apt-get clean \
+    && rm -rf /tmp/* /var/tmp/* \
+    && rm -rf /var/lib/apt/lists/*
+
+# Install arrow
+RUN conda install -c conda-forge --all --quiet --yes arrow-cpp=6.*.* pyarrow=6.*.* r-arrow=6.*.*
+
+# Install nessie requirements
+# COPY requirements_pip.txt /home/user
+
+#RUN pip install --upgrade pip \
+#    && pip install -r /home/user/requirements_pip.txt
+
+COPY jars/delta-core_2.12-1.1.0.jar \
+     jars/nessie-deltalake-spark3-0.9.0.jar \
+     jars/postgresql-42.3.1.jar \
+     jars/graphframes-0.8.2-spark3.2-s_2.12.jar \
+     /usr/local/spark/jars/
+     
+
+CMD ["/bin/bash"]

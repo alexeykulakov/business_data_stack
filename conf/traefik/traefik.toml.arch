@@ -1,0 +1,25 @@
+debug = true
+
+logLevel = "ERROR"
+defaultEntryPoints = ["https","http"]
+
+[entryPoints]
+  [entryPoints.http]
+  address = ":80"
+    [entryPoints.http.redirect]
+    entryPoint = "https"
+  [entryPoints.https]
+  address = ":443"
+    [entryPoints.https.tls]
+      [[entryPoints.https.tls.certificates]]
+      certFile = "/etc/certs/fullchain.crt"
+      keyFile = "/etc/certs/privkey.key"
+
+[docker]
+#domain = "docker.local"
+domain = "akula.eidox.io"
+watch = true
+
+[api]
+  [api.statistics]
+    recentErrors = 10
